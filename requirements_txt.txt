@@ -1,3 +1,6 @@
+# Simplified requirements for Streamlit Cloud deployment
+# Use this if the versioned requirements.txt causes issues
+
 streamlit
 openai
 pandas
@@ -7,3 +10,6 @@ spacy
 pillow
 matplotlib
 plotly
+
+# spaCy English model (must be last line)
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
