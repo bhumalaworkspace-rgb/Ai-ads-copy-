@@ -1,9 +1,20 @@
 import streamlit as st
-import openai
 import json
 from datetime import datetime
 import pandas as pd
 from io import BytesIO
+
+# Import OpenAI with error handling
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    try:
+        import openai
+        OPENAI_AVAILABLE = True
+    except ImportError:
+        OPENAI_AVAILABLE = False
+        st.error("⚠️ OpenAI package not installed. Please add 'openai' to requirements.txt")
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -12,7 +23,15 @@ from reportlab.lib import colors
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-import spacy
+
+# Try to import spaCy (optional for faster deployment)
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except ImportError:
+    SPACY_AVAILABLE = False
+    st.info("ℹ️ Using basic keyword extraction. For advanced NLP, add spaCy to requirements.txt")
+
 from collections import Counter
 import re
 import sqlite3
@@ -184,21 +203,53 @@ def delete_content(content_id, user_id):
     conn.commit()
     conn.close()
 
-# Load spaCy model
+# Load spaCy model (lazy loading to speed up initial load)
 @st.cache_resource
 def load_spacy_model():
+    if not SPACY_AVAILABLE:
+        return None
+    
     try:
         nlp = spacy.load("en_core_web_sm")
-    except:
-        import os
-        os.system("python -m spacy download en_core_web_sm")
-        nlp = spacy.load("en_core_web_sm")
-    return nlp
+        return nlp
+    except Exception as e:
+        st.warning(f"⚠️ spaCy model not loaded. Using basic keyword extraction.")
+        return None
 
-nlp = load_spacy_model()
+# Don't load immediately - only when needed
+nlp = None
 
 # NLP Keyword Extraction
 def extract_keywords(text, top_n=10):
+    global nlp
+    
+    # Load spaCy only when needed
+    if nlp is None:
+        nlp = load_spacy_model()
+    
+    # If spaCy failed to load, use basic keyword extraction
+    if nlp is None:
+        # Basic keyword extraction without spaCy
+        import re
+        from collections import Counter
+        
+        # Remove common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                      'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'be', 'been',
+                      'this', 'that', 'these', 'those', 'it', 'its', 'we', 'our', 'your'}
+        
+        # Extract words
+        words = re.findall(r'\b[a-z]{3,}\b', text.lower())
+        
+        # Filter stop words and count
+        keywords = [w for w in words if w not in stop_words]
+        keyword_freq = Counter(keywords)
+        
+        # Get top keywords
+        top_keywords = [word for word, freq in keyword_freq.most_common(top_n)]
+        return top_keywords
+    
+    # Use spaCy if available
     doc = nlp(text.lower())
     
     # Extract nouns and adjectives
@@ -274,11 +325,17 @@ PLATFORM_PROMPTS = {
 
 # AI Content Generation
 def generate_content(api_key, platform, product_name, description, audience, tone, keywords):
-    openai.api_key = api_key
+    if not OPENAI_AVAILABLE:
+        st.error("OpenAI package is not available. Please check your installation.")
+        return None
     
-    platform_config = PLATFORM_PROMPTS[platform]
-    
-    prompt = f"""
+    try:
+        # Try new OpenAI client (v1.0+)
+        client = OpenAI(api_key=api_key)
+        
+        platform_config = PLATFORM_PROMPTS[platform]
+        
+        prompt = f"""
 {platform_config['instructions']}
 
 Product Information:
@@ -296,9 +353,8 @@ Return the response in the following JSON format:
     "hashtags": ["hashtag1", "hashtag2", "hashtag3"]
 }}
 """
-    
-    try:
-        response = openai.ChatCompletion.create(
+        
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": platform_config['system']},
@@ -310,23 +366,61 @@ Return the response in the following JSON format:
         
         content = response.choices[0].message.content
         
-        # Parse JSON response
-        try:
-            content_json = json.loads(content)
-        except:
-            # Fallback if not JSON
-            content_json = {
-                "headline": "Check out our amazing product!",
-                "body": content,
-                "cta": "Shop Now",
-                "hashtags": keywords[:5]
-            }
+    except AttributeError:
+        # Fallback to old OpenAI API (pre-v1.0)
+        import openai
+        openai.api_key = api_key
         
-        return content_json
+        platform_config = PLATFORM_PROMPTS[platform]
+        
+        prompt = f"""
+{platform_config['instructions']}
+
+Product Information:
+- Name: {product_name}
+- Description: {description}
+- Target Audience: {audience}
+- Brand Tone: {tone}
+- Keywords: {', '.join(keywords)}
+
+Return the response in the following JSON format:
+{{
+    "headline": "compelling headline",
+    "body": "main content body",
+    "cta": "call to action",
+    "hashtags": ["hashtag1", "hashtag2", "hashtag3"]
+}}
+"""
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": platform_config['system']},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=800
+        )
+        
+        content = response.choices[0].message.content
     
     except Exception as e:
         st.error(f"Error generating content: {str(e)}")
         return None
+    
+    # Parse JSON response
+    try:
+        content_json = json.loads(content)
+    except:
+        # Fallback if not JSON
+        content_json = {
+            "headline": "Check out our amazing product!",
+            "body": content,
+            "cta": "Shop Now",
+            "hashtags": keywords[:5]
+        }
+    
+    return content_json
 
 # Export to PDF
 def generate_pdf(content_data):
